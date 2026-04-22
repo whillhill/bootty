@@ -19,7 +19,7 @@ jobs:
             target: aarch64-apple-darwin
             artifact_binary: bootty
           - platform_id: darwin-x64
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             artifact_binary: bootty
           - platform_id: linux-x64-gnu
