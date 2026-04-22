@@ -29,6 +29,30 @@ jobs:
       - name: Sync versions
         run: uv run python scripts/sync_version.py
 
+      - name: Validate Python dependency versions
+        run: |
+          uv run python - <<'PY'
+          import re
+          import tomllib
+          from pathlib import Path
+
+          root = Path(".")
+          cargo_text = (root / "Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_text, flags=re.MULTILINE)
+          if not match:
+              raise SystemExit("Cargo.toml 版本号缺失")
+          expected = match.group(1)
+
+          pyproject = tomllib.loads((root / "python/packages/bootty/pyproject.toml").read_text(encoding="utf-8"))
+          deps = pyproject["project"]["dependencies"]
+          for dep in deps:
+              if "bootty-bin-" not in dep:
+                  continue
+              if f"=={expected};" not in dep:
+                  raise SystemExit(f"依赖版本不一致: {dep}，预期 {expected}")
+          print(f"[完成] PyPI 主包依赖版本一致: {expected}")
+          PY
+
       - name: Download release-build artifacts
         run: |
           mkdir -p dist
