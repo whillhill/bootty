@@ -23,6 +23,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Validate release source
+        shell: bash
+        run: |
+          echo "[info] Git ref: ${GITHUB_REF}"
+          echo "[info] Git sha: ${GITHUB_SHA}"
+          test -f python/packages/bootty/pyproject.toml || { echo "[error] Missing python/packages/bootty/pyproject.toml; this ref is not using the new release layout"; exit 1; }
+          grep -q 'npm_packages_dir = ROOT / "npm" / "packages"' scripts/sync_version.py || { echo "[error] scripts/sync_version.py is outdated (likely still references old paths)"; exit 1; }
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
@@ -38,19 +46,19 @@ jobs:
 
           root = Path(".")
           cargo_text = (root / "Cargo.toml").read_text(encoding="utf-8")
-          match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_text, flags=re.MULTILINE)
-          if not match:
-              raise SystemExit("Cargo.toml 版本号缺失")
-          expected = match.group(1)
+              match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_text, flags=re.MULTILINE)
+              if not match:
+                  raise SystemExit("Cargo.toml version is missing")
+              expected = match.group(1)
 
           pyproject = tomllib.loads((root / "python/packages/bootty/pyproject.toml").read_text(encoding="utf-8"))
           deps = pyproject["project"]["dependencies"]
           for dep in deps:
-              if "bootty-bin-" not in dep:
-                  continue
-              if f"=={expected};" not in dep:
-                  raise SystemExit(f"依赖版本不一致: {dep}，预期 {expected}")
-          print(f"[完成] PyPI 主包依赖版本一致: {expected}")
+                  if "bootty-bin-" not in dep:
+                      continue
+                  if f"=={expected};" not in dep:
+                      raise SystemExit(f"Dependency version mismatch: {dep}, expected {expected}")
+              print(f"[ok] PyPI main package dependency versions are aligned: {expected}")
           PY
 
       - name: Download release-build artifacts

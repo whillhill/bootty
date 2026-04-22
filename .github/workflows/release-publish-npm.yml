@@ -23,6 +23,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Validate release source
+        shell: bash
+        run: |
+          echo "[info] Git ref: ${GITHUB_REF}"
+          echo "[info] Git sha: ${GITHUB_SHA}"
+          test -f npm/packages/bootty/package.json || { echo "[error] Missing npm/packages/bootty/package.json; this ref is not using the new release layout"; exit 1; }
+          grep -q 'npm_packages_dir = ROOT / "npm" / "packages"' scripts/sync_version.py || { echo "[error] scripts/sync_version.py is outdated (likely still references old paths)"; exit 1; }
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 

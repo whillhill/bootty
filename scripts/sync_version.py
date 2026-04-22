@@ -90,8 +90,12 @@ def main() -> None:
     version = read_cargo_version()
     print(f"[info] Unified version: {version}")
 
-    json_files = [ROOT / "npm" / "package.json"]
-    json_files.extend(sorted((ROOT / "npm" / "packages").rglob("package.json")))
+    npm_packages_dir = ROOT / "npm" / "packages"
+    if not npm_packages_dir.exists():
+        raise RuntimeError(f"Missing npm packages directory: {npm_packages_dir}")
+    json_files = sorted(npm_packages_dir.rglob("package.json"))
+    if not json_files:
+        raise RuntimeError(f"No npm package.json files found under: {npm_packages_dir}")
     for json_file in json_files:
         update_json_version(json_file, version)
         print(f"[ok] Synced version: {json_file.relative_to(ROOT)}")
