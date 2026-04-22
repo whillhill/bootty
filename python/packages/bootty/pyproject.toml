@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bootty"
-version = "0.1.4"
+version = "0.1.5"
 description = "bootty main package; dispatches to a prebuilt platform binary"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "bootty-bin-darwin-arm64==0.1.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
-  "bootty-bin-darwin-x64==0.1.4; platform_system == 'Darwin' and platform_machine == 'x86_64'",
-  "bootty-bin-linux-x64-gnu==0.1.4; platform_system == 'Linux' and platform_machine == 'x86_64'",
-  "bootty-bin-win32-x64-msvc==0.1.4; platform_system == 'Windows' and platform_machine == 'AMD64'",
+  "bootty-bin-darwin-arm64==0.1.5; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "bootty-bin-darwin-x64==0.1.5; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+  "bootty-bin-linux-x64-gnu==0.1.5; platform_system == 'Linux' and platform_machine == 'x86_64'",
+  "bootty-bin-win32-x64-msvc==0.1.5; platform_system == 'Windows' and platform_machine == 'AMD64'",
 ]
 
 [project.scripts]
