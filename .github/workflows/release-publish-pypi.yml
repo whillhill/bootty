@@ -80,19 +80,19 @@ jobs:
 
           root = Path(".")
           cargo_text = (root / "Cargo.toml").read_text(encoding="utf-8")
-              match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_text, flags=re.MULTILINE)
-              if not match:
-                  raise SystemExit("Cargo.toml version is missing")
-              expected = match.group(1)
+          match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_text, flags=re.MULTILINE)
+          if not match:
+              raise SystemExit("Cargo.toml version is missing")
+          expected = match.group(1)
 
           pyproject = tomllib.loads((root / "python/packages/bootty/pyproject.toml").read_text(encoding="utf-8"))
           deps = pyproject["project"]["dependencies"]
           for dep in deps:
-                  if "bootty-bin-" not in dep:
-                      continue
-                  if f"=={expected};" not in dep:
-                      raise SystemExit(f"Dependency version mismatch: {dep}, expected {expected}")
-              print(f"[ok] PyPI main package dependency versions are aligned: {expected}")
+              if "bootty-bin-" not in dep:
+                  continue
+              if f"=={expected};" not in dep:
+                  raise SystemExit(f"Dependency version mismatch: {dep}, expected {expected}")
+          print(f"[ok] PyPI main package dependency versions are aligned: {expected}")
           PY
 
       - name: Download release-build artifacts
