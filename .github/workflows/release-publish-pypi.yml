@@ -16,12 +16,46 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: pypi
     env:
       GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Debug OIDC claims
+        run: |
+          uv run python - <<'PY'
+          import base64
+          import json
+          import os
+          import urllib.request
+
+          audience = "pypi"
+          request_url = f"{os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']}&audience={audience}"
+          request = urllib.request.Request(
+              request_url,
+              headers={"Authorization": f"Bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}"},
+          )
+          with urllib.request.urlopen(request) as response:
+              oidc_token = json.loads(response.read().decode("utf-8"))["value"]
+
+          payload = oidc_token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+          fields = [
+              "aud",
+              "sub",
+              "repository",
+              "ref",
+              "job_workflow_ref",
+              "environment",
+          ]
+          print("[info] OIDC claims used for PyPI trusted publishing:")
+          for field in fields:
+              print(f"  {field}: {claims.get(field)}")
+          PY
 
       - name: Validate release source
         shell: bash
