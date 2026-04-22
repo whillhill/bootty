@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+NPM_REPOSITORY_URL = "https://github.com/whillhill/bootty"
 
 
 def read_cargo_version() -> str:
@@ -20,6 +21,12 @@ def read_cargo_version() -> str:
 def update_json_version(path: Path, version: str) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     data["version"] = version
+    repository = data.get("repository")
+    if not isinstance(repository, dict):
+        repository = {"type": "git"}
+    repository["type"] = "git"
+    repository["url"] = NPM_REPOSITORY_URL
+    data["repository"] = repository
     if "optionalDependencies" in data:
         for name in data["optionalDependencies"]:
             data["optionalDependencies"][name] = version

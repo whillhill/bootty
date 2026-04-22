@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/whillhill/bootty.git"
+    "url": "https://github.com/whillhill/bootty"
   },
   "os": [
     "win32"
