@@ -1,7 +1,6 @@
 use crate::pty::PtyMaster;
 use crate::sdp::SessionDescription;
 use crate::session::{sdp_has_candidate, Session};
-use crate::serve::start_server;
 use crate::ten_kb_site::{create_10kb_file, poll_for_response, rand_seq};
 use crate::terminal::{is_stdin_terminal, TerminalState};
 use anyhow::{bail, Context, Result};
@@ -20,8 +19,6 @@ pub struct HostSession {
     cmd: Vec<String>,
     non_interactive: bool,
     one_way: bool,
-    serve: Option<u16>,
-    max_sessions: usize,
     dc: Arc<std::sync::Mutex<Option<Arc<RTCDataChannel>>>>,
 }
 
@@ -31,8 +28,6 @@ impl HostSession {
         non_interactive: bool,
         one_way: bool,
         stun_servers: Vec<String>,
-        serve: Option<u16>,
-        max_sessions: usize,
     ) -> Result<Self> {
         let session = Session::new(stun_servers, true).await?;
         Ok(HostSession {
@@ -40,25 +35,11 @@ impl HostSession {
             cmd,
             non_interactive,
             one_way,
-            serve,
-            max_sessions,
             dc: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        if let Some(port) = self.serve {
-            println!("Starting multi-session web server...");
-            return start_server(
-                port,
-                self.cmd.clone(),
-                self.non_interactive,
-                self.session.stun_servers.clone(),
-                self.max_sessions,
-            )
-            .await;
-        }
-
         let err_tx_state = self.session.err_tx.clone();
         self.session.pc.on_peer_connection_state_change(Box::new(
             move |state: RTCPeerConnectionState| {
@@ -89,7 +70,7 @@ impl HostSession {
             println!("Connection data is ready:\n");
             println!("{}\n", offer.encode()?);
             println!(
-                "Share the connection string with the peer. They should run:\n  bootty \"<CONNECTION_STRING>\"\n"
+                "Share the connection string with the peer. They should run:\n  bootty connect \"<CONNECTION_STRING>\"\n"
             );
         }
 

@@ -1,0 +1,47 @@
+# Allowlist-style .gitignore:
+# - Ignore everything by default
+# - Re-include only what we want to version
+
+*
+
+# Always keep this file
+!/.gitignore
+
+# Rust project files
+!/Cargo.toml
+!/Cargo.lock
+!/src/
+!/src/**
+
+# Assets checked into repo
+!/assets/
+!/assets/**
+
+# Build/release automation + packaging sources
+!/.github/
+!/.github/**
+!/scripts/
+!/scripts/**
+!/platforms.toml
+
+# npm packaging sources (including prebuilt package templates)
+!/npm/
+!/npm/**
+
+# Python / PyPI packaging sources
+!/python/
+!/python/**
+!/pypi/
+!/pypi/**
+
+# Root docs / planning files you want to track
+!/README.md
+!/CLAUDE.md
+!/*.md
+
+# Explicitly keep ignored build outputs ignored (for clarity)
+/target/
+/dist/
+/wheelhouse/
+__pycache__/
+*.pyc
