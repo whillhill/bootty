@@ -1,0 +1,23 @@
+{
+  "name": "bootty",
+  "version": "0.1.3",
+  "description": "bootty.",
+  "license": "MIT",
+  "bin": {
+    "bootty": "bin/bootty.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node scripts/verify-binary.js"
+  },
+  "keywords": [
+    "terminal",
+    "webrtc",
+    "cli",
+    "bootty"
+  ]
+}
