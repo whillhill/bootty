@@ -26,7 +26,7 @@ jobs:
 
       - name: Debug OIDC claims
         run: |
-          uv run python - <<'PY'
+          python3 - <<'PY'
           import base64
           import json
           import os
