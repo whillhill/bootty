@@ -1,0 +1,20 @@
+{
+  "name": "bootty-darwin-arm64",
+  "version": "0.1.4",
+  "description": "bootty platform package (darwin arm64)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whillhill/bootty.git"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ]
+}

@@ -31,8 +31,6 @@
 # Python / PyPI packaging sources
 !/python/
 !/python/**
-!/pypi/
-!/pypi/**
 
 # Root docs / planning files you want to track
 !/README.md
@@ -45,3 +43,6 @@
 /wheelhouse/
 __pycache__/
 *.pyc
+npm/packages/*/bin/bootty
+npm/packages/*/bin/bootty.exe
+npm/packages/*/*.tgz

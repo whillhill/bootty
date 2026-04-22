@@ -1,0 +1,29 @@
+{
+  "name": "bootty",
+  "version": "0.1.4",
+  "description": "bootty CLI entry package; loads a prebuilt binary per platform",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whillhill/bootty.git"
+  },
+  "bin": {
+    "bootty": "bin/bootty.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "bootty-darwin-arm64": "0.1.4",
+    "bootty-darwin-x64": "0.1.4",
+    "bootty-linux-x64-gnu": "0.1.4",
+    "bootty-win32-x64-msvc": "0.1.4"
+  },
+  "keywords": [
+    "terminal",
+    "webrtc",
+    "cli",
+    "bootty"
+  ]
+}

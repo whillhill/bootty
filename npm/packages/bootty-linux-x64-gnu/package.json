@@ -1,0 +1,20 @@
+{
+  "name": "bootty-linux-x64-gnu",
+  "version": "0.1.4",
+  "description": "bootty platform package (linux x64 gnu)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whillhill/bootty.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ]
+}

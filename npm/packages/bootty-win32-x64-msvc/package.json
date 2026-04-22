@@ -1,0 +1,20 @@
+{
+  "name": "bootty-win32-x64-msvc",
+  "version": "0.1.4",
+  "description": "bootty platform package (win32 x64 msvc)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whillhill/bootty.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ]
+}

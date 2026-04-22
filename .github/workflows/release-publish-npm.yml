@@ -1,0 +1,60 @@
+name: release-publish-npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Run ID of the release-build workflow"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync versions
+        run: uv run python scripts/sync_version.py
+
+      - name: Download release-build artifacts
+        run: |
+          mkdir -p dist
+          for platform in darwin-arm64 darwin-x64 linux-x64-gnu win32-x64-msvc; do
+            gh run download "${{ inputs.build_run_id }}" --name "bootty-${platform}" --dir "dist/${platform}"
+          done
+
+      - name: Assemble npm platform packages
+        run: uv run python scripts/assemble_npm_packages.py --dist-root dist
+
+      - name: Publish npm platform packages
+        run: |
+          for pkg in \
+            npm/packages/bootty-darwin-arm64 \
+            npm/packages/bootty-darwin-x64 \
+            npm/packages/bootty-linux-x64-gnu \
+            npm/packages/bootty-win32-x64-msvc; do
+            (cd "$pkg" && npm publish --access public --provenance)
+          done
+
+      - name: Publish npm main package
+        run: |
+          (cd npm/packages/bootty && npm publish --access public --provenance)
