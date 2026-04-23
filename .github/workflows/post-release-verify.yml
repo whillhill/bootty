@@ -1,0 +1,174 @@
+name: post-release-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to verify (e.g. 0.1.5)"
+        required: true
+        type: string
+
+jobs:
+  verify:
+    name: verify-${{ matrix.platform_id }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_id: darwin-arm64
+            runner: macos-latest
+            npm_package: bootty-darwin-arm64
+            py_package: bootty-bin-darwin-arm64
+          - platform_id: darwin-x64
+            runner: macos-15-intel
+            npm_package: bootty-darwin-x64
+            py_package: bootty-bin-darwin-x64
+          - platform_id: linux-x64-gnu
+            runner: ubuntu-latest
+            npm_package: bootty-linux-x64-gnu
+            py_package: bootty-bin-linux-x64-gnu
+          - platform_id: win32-x64-msvc
+            runner: windows-latest
+            npm_package: bootty-win32-x64-msvc
+            py_package: bootty-bin-win32-x64-msvc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify npm packages are published
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          npm view "bootty@${version}" version
+          npm view "${{ matrix.npm_package }}@${version}" version
+
+      - name: Verify npm install and runtime package resolution
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf .verify-npm
+          mkdir -p .verify-npm
+          cd .verify-npm
+          npm init -y >/dev/null 2>&1
+          npm install --no-fund --no-audit "bootty@${VERSION}"
+
+          node - <<'JS'
+          const version = process.env.VERSION;
+          const expectedByRuntime = {
+            "darwin-arm64": "bootty-darwin-arm64",
+            "darwin-x64": "bootty-darwin-x64",
+            "linux-x64": "bootty-linux-x64-gnu",
+            "win32-x64": "bootty-win32-x64-msvc",
+          };
+          const runtimeKey = `${process.platform}-${process.arch}`;
+          const expected = expectedByRuntime[runtimeKey];
+          if (!expected) {
+            throw new Error(`Unsupported runtime for verification: ${runtimeKey}`);
+          }
+
+          const mainVersion = require("bootty/package.json").version;
+          let platformVersion;
+          try {
+            platformVersion = require(`${expected}/package.json`).version;
+          } catch (error) {
+            throw new Error(`Expected platform package ${expected} is not installed: ${error.message}`);
+          }
+
+          if (mainVersion !== version) {
+            throw new Error(`bootty version mismatch: got ${mainVersion}, expected ${version}`);
+          }
+          if (platformVersion !== version) {
+            throw new Error(`${expected} version mismatch: got ${platformVersion}, expected ${version}`);
+          }
+
+          console.log(`[ok] npm main=bootty@${mainVersion}, platform=${expected}@${platformVersion}, runtime=${runtimeKey}`);
+          JS
+
+          node - <<'JS'
+          const { spawnSync } = require("child_process");
+          const path = require("path");
+
+          const version = process.env.VERSION;
+          const binName = process.platform === "win32" ? "bootty.cmd" : "bootty";
+          const binPath = path.join(process.cwd(), "node_modules", ".bin", binName);
+          const result = spawnSync(binPath, ["--version"], { encoding: "utf-8" });
+
+          const output = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+          console.log(output);
+          if (result.status !== 0) {
+            throw new Error(`bootty --version failed with exit code ${result.status}`);
+          }
+          if (!output.includes(version)) {
+            throw new Error(`bootty --version output does not contain expected version ${version}`);
+          }
+          console.log(`[ok] npm CLI output contains expected version ${version}`);
+          JS
+
+      - name: Verify PyPI install and runtime package resolution
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          EXPECTED_PY_PACKAGE: ${{ matrix.py_package }}
+        run: |
+          set -euo pipefail
+
+          uv run --with "bootty==${VERSION}" python - <<'PY'
+          import importlib.metadata as metadata
+          import os
+          import platform
+
+          version = os.environ["VERSION"]
+          expected_py_package = os.environ["EXPECTED_PY_PACKAGE"]
+
+          main_version = metadata.version("bootty")
+          platform_version = metadata.version(expected_py_package)
+
+          if main_version != version:
+              raise SystemExit(f"bootty version mismatch: got {main_version}, expected {version}")
+          if platform_version != version:
+              raise SystemExit(f"{expected_py_package} version mismatch: got {platform_version}, expected {version}")
+
+          runtime = (platform.system(), platform.machine())
+          print(f"[ok] pypi main=bootty@{main_version}, platform={expected_py_package}@{platform_version}, runtime={runtime}")
+          PY
+
+          uv run --with "bootty==${VERSION}" python - <<'PY'
+          import os
+          import subprocess
+
+          version = os.environ["VERSION"]
+          result = subprocess.run(["bootty", "--version"], capture_output=True, text=True)
+          output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+          print(output)
+          if result.returncode != 0:
+              raise SystemExit(f"bootty --version failed with exit code {result.returncode}")
+          if version not in output:
+              raise SystemExit(f"bootty --version output does not contain expected version {version}")
+          print(f"[ok] pypi CLI output contains expected version {version}")
+          PY
+
+      - name: Write verification summary
+        shell: bash
+        run: |
+          {
+            echo "### Verification passed"
+            echo ""
+            echo "- Platform: \`${{ matrix.platform_id }}\`"
+            echo "- Version: \`${{ inputs.version }}\`"
+            echo "- npm package: \`${{ matrix.npm_package }}\`"
+            echo "- PyPI package: \`${{ matrix.py_package }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

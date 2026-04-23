@@ -13,9 +13,10 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
+use chrono::{DateTime, Local};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -30,6 +31,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 const AUTH_HEADER: &str = "x-bootty-auth";
 const ADMIN_TOKEN_HEADER: &str = "x-bootty-admin-token";
+const CLOSED_SESSION_HISTORY_LIMIT: usize = 1024;
 
 const INDEX_HTML_TEMPLATE: &str = r#"
 <!DOCTYPE html>
@@ -271,6 +273,14 @@ impl ServeAuthRuntime {
             Self::PasswordHash(_) => "password",
         }
     }
+
+    fn mode_name(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pin(_) => "pin",
+            Self::PasswordHash(_) => "password",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -290,13 +300,15 @@ pub struct ServeLaunchOptions {
 pub enum SessionLifecycleState {
     Pending,
     Connected,
+    Closed,
 }
 
 impl SessionLifecycleState {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Connected => "connected",
+            Self::Closed => "closed",
         }
     }
 }
@@ -306,8 +318,9 @@ pub struct AdminSessionItem {
     pub session_id: String,
     pub state: SessionLifecycleState,
     pub client_addr: Option<String>,
-    pub created_at_unix: u64,
-    pub last_active_at_unix: u64,
+    pub created_at: String,
+    pub last_active_at: String,
+    pub auth_mode: String,
     pub cmd_preview: String,
 }
 
@@ -334,6 +347,9 @@ pub struct ServeState {
     mode: ServeMode,
     auth: ServeAuthRuntime,
     sessions: Arc<Mutex<HashMap<String, Arc<BrowserSession>>>>,
+    closed_sessions: Arc<Mutex<HashMap<String, ClosedSessionInfo>>>,
+    closed_session_order: Arc<Mutex<VecDeque<String>>>,
+    auth_mode: Arc<String>,
     limiter: Arc<Semaphore>,
 }
 
@@ -353,6 +369,13 @@ struct BrowserSession {
     created_at_unix: u64,
     last_active_at_unix: Arc<Mutex<u64>>,
     _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Debug, Clone)]
+struct ClosedSessionInfo {
+    client_addr: Option<String>,
+    created_at_unix: u64,
+    last_active_at_unix: u64,
 }
 
 #[derive(Serialize)]
@@ -391,6 +414,9 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
         mode: options.mode.clone(),
         auth: options.auth.clone(),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        closed_sessions: Arc::new(Mutex::new(HashMap::new())),
+        closed_session_order: Arc::new(Mutex::new(VecDeque::new())),
+        auth_mode: Arc::new(options.auth.mode_name().to_string()),
         limiter: Arc::new(Semaphore::new(options.max_sessions)),
     };
 
@@ -406,7 +432,7 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
 
     let public_listener = tokio::net::TcpListener::bind(format!("{}:{}", options.host, options.port))
         .await
-        .with_context(|| format!("Failed to bind public server on {}:{}", options.host, options.port))?;
+        .with_context(|| format!("Failed to bind public service address: {}:{}", options.host, options.port))?;
 
     let admin_token = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -415,10 +441,10 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
         .collect::<String>();
     let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .context("Failed to bind local admin server")?;
+        .context("Failed to bind local admin interface")?;
     let admin_addr = admin_listener
         .local_addr()
-        .context("Failed to read local admin address")?;
+        .context("Failed to read local admin interface address")?;
 
     let runtime_info = ServeRuntimeInfo {
         pid: std::process::id(),
@@ -440,17 +466,17 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
 
     let admin_task = tokio::spawn(async move {
         if let Err(err) = axum::serve(admin_listener, admin_app).await {
-            tracing::error!("admin server exited with error: {err}");
+            tracing::error!("Admin interface exited unexpectedly: {err}");
         }
     });
 
-    println!("Public server listening on http://{}:{}/", options.host, options.port);
-    println!("Serve mode: {:?}", state.mode);
+    println!("Service started: http://{}:{}/", options.host, options.port);
+    println!("Mode: {:?}", state.mode);
     println!("Session command: {}", state.cmd_preview.as_ref());
     println!("Max sessions: {}", state.max_sessions);
-    println!("Local admin endpoint: {}", admin_addr);
+    println!("Local admin interface: {}", admin_addr);
     if let ServeAuthRuntime::Pin(pin) = &state.auth {
-        println!("Authentication PIN: {pin}");
+        println!("PIN: {pin}");
     }
 
     let serve_result = axum::serve(
@@ -461,7 +487,7 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await
-    .context("Public server exited with error");
+    .context("Public service exited unexpectedly");
 
     close_all_sessions(&state).await;
     let _ = remove_serve_runtime();
@@ -478,20 +504,20 @@ fn validate_launch_options(options: &ServeLaunchOptions) -> Result<()> {
     match options.mode {
         ServeMode::Local => {
             if options.host != "127.0.0.1" && options.host != "localhost" {
-                bail!("serve mode 'local' requires --host 127.0.0.1 or localhost");
+                bail!("serve mode=local requires --host to be 127.0.0.1 or localhost");
             }
             if !matches!(options.auth, ServeAuthRuntime::None) {
-                bail!("serve mode 'local' does not allow authentication mode");
+                bail!("serve mode=local does not allow enabling auth");
             }
         }
         ServeMode::LanOpen => {
             if !matches!(options.auth, ServeAuthRuntime::None) {
-                bail!("serve mode 'lan-open' does not allow authentication mode");
+                bail!("serve mode=lan-open does not allow enabling auth");
             }
         }
         ServeMode::LanAuth => {
             if matches!(options.auth, ServeAuthRuntime::None) {
-                bail!("serve mode 'lan-auth' requires --auth pin or --auth password");
+                bail!("serve mode=lan-auth requires an auth method");
             }
         }
     }
@@ -504,7 +530,7 @@ fn ensure_public_auth(state: &ServeState, headers: &HeaderMap) -> Result<(), (St
         ServeAuthRuntime::None => Ok(()),
         ServeAuthRuntime::Pin(pin) => {
             let provided = read_header_value(headers, AUTH_HEADER)
-                .ok_or((StatusCode::UNAUTHORIZED, "Missing authentication header".to_string()))?;
+                .ok_or((StatusCode::UNAUTHORIZED, "Missing auth header".to_string()))?;
             if provided == *pin {
                 Ok(())
             } else {
@@ -513,7 +539,7 @@ fn ensure_public_auth(state: &ServeState, headers: &HeaderMap) -> Result<(), (St
         }
         ServeAuthRuntime::PasswordHash(encoded) => {
             let provided = read_header_value(headers, AUTH_HEADER)
-                .ok_or((StatusCode::UNAUTHORIZED, "Missing authentication header".to_string()))?;
+                .ok_or((StatusCode::UNAUTHORIZED, "Missing auth header".to_string()))?;
             let matched = verify_password(&provided, encoded).map_err(internal_error)?;
             if matched {
                 Ok(())
@@ -556,10 +582,7 @@ async fn create_session_handler(
         .map_err(|_| {
             (
                 StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "Too many active sessions (max_sessions={}). Close some tabs and try again.",
-                    state.max_sessions
-                ),
+                format!("Too many active sessions (max_sessions={}), please close some sessions and retry", state.max_sessions),
             )
         })?;
 
@@ -598,16 +621,16 @@ async fn answer_handler(
 
     let session = get_session(&state, &session_id)
         .await
-        .ok_or((StatusCode::NOT_FOUND, "Session not found or already closed.".to_string()))?;
+        .ok_or((StatusCode::NOT_FOUND, "Session does not exist or has been closed".to_string()))?;
 
     let answer = body.trim().to_string();
     if answer.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Answer must not be empty.".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "Answer cannot be empty".to_string()));
     }
     if !sdp_has_candidate(&answer) {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Answer contains no ICE candidates. Check browser network and try again.".to_string(),
+            "Missing ICE candidate in Answer, please check browser network and retry".to_string(),
         ));
     }
 
@@ -616,7 +639,7 @@ async fn answer_handler(
         if *answered {
             return Err((
                 StatusCode::CONFLICT,
-                "Answer already received for this session.".to_string(),
+                "Answer has already been submitted for this session".to_string(),
             ));
         }
         *answered = true;
@@ -630,7 +653,7 @@ async fn answer_handler(
     }
 
     update_last_active(&session.last_active_at_unix).await;
-    Ok("Answer received.".to_string())
+    Ok("Answer received".to_string())
 }
 
 async fn delete_session_handler(
@@ -642,9 +665,9 @@ async fn delete_session_handler(
 
     let removed = remove_session(&state, &session_id, true).await;
     if removed {
-        Ok("Session closed.".to_string())
+        Ok("Session closed".to_string())
     } else {
-        Err((StatusCode::NOT_FOUND, "Session not found or already closed.".to_string()))
+        Err((StatusCode::NOT_FOUND, "Session does not exist or has been closed".to_string()))
     }
 }
 
@@ -698,6 +721,9 @@ async fn admin_list_sessions_handler(
     let items = list_sessions(&state.serve_state).await;
     if let Some(filter_state) = query.state.as_deref() {
         let normalized = filter_state.trim().to_lowercase();
+        if normalized != "pending" && normalized != "connected" && normalized != "closed" {
+            return Err((StatusCode::BAD_REQUEST, "state only supports pending|connected|closed".to_string()));
+        }
         let filtered = items
             .into_iter()
             .filter(|item| item.state.as_str() == normalized)
@@ -716,20 +742,23 @@ async fn admin_send_cmd_handler(
 ) -> Result<Json<AdminCmdResponse>, (StatusCode, String)> {
     ensure_admin_token(&state, &headers)?;
 
-    let session = get_session(&state.serve_state, &session_id)
-        .await
-        .ok_or((StatusCode::NOT_FOUND, "Session not found.".to_string()))?;
+    let Some(session) = get_session(&state.serve_state, &session_id).await else {
+        if is_closed_session(&state.serve_state, &session_id).await {
+            return Err((StatusCode::CONFLICT, "Session is closed, cannot inject command".to_string()));
+        }
+        return Err((StatusCode::NOT_FOUND, "Session does not exist".to_string()));
+    };
 
     let lifecycle = *session.lifecycle.lock().await;
     if lifecycle != SessionLifecycleState::Connected {
         return Err((
             StatusCode::CONFLICT,
-            "Session is not connected yet; command injection is not allowed.".to_string(),
+            "Session is not fully connected, cannot inject command".to_string(),
         ));
     }
 
     if payload.cmd.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Command must not be empty.".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "Command cannot be empty".to_string()));
     }
 
     let mut bytes = payload.cmd.as_bytes().to_vec();
@@ -741,13 +770,13 @@ async fn admin_send_cmd_handler(
         let mut guard = session.writer.lock().unwrap();
         let writer = guard
             .as_mut()
-            .ok_or((StatusCode::CONFLICT, "Session stdin is not ready.".to_string()))?;
+            .ok_or((StatusCode::CONFLICT, "Session stdin is not ready yet".to_string()))?;
         writer
             .write_all(&bytes)
-            .map_err(|e| internal_error(format!("failed to write command: {e}")))?;
+            .map_err(|e| internal_error(format!("Failed to write command: {e}")))?;
         writer
             .flush()
-            .map_err(|e| internal_error(format!("failed to flush command: {e}")))?;
+            .map_err(|e| internal_error(format!("Failed to flush command: {e}")))?;
     }
 
     update_last_active(&session.last_active_at_unix).await;
@@ -760,23 +789,58 @@ async fn admin_send_cmd_handler(
 
 async fn list_sessions(state: &ServeState) -> Vec<AdminSessionItem> {
     let sessions = state.sessions.lock().await;
+    let closed = state.closed_sessions.lock().await;
     let mut items = Vec::with_capacity(sessions.len());
+    let mut active_ids = HashSet::with_capacity(sessions.len());
 
     for (session_id, session) in sessions.iter() {
         let state_value = *session.lifecycle.lock().await;
         let last_active = *session.last_active_at_unix.lock().await;
-        items.push(AdminSessionItem {
-            session_id: session_id.clone(),
-            state: state_value,
-            client_addr: session.client_addr.clone(),
-            created_at_unix: session.created_at_unix,
-            last_active_at_unix: last_active,
-            cmd_preview: state.cmd_preview.as_ref().clone(),
-        });
+        active_ids.insert(session_id.clone());
+        items.push((
+            session.created_at_unix,
+            AdminSessionItem {
+                session_id: session_id.clone(),
+                state: state_value,
+                client_addr: session.client_addr.clone(),
+                created_at: format_unix_secs(session.created_at_unix),
+                last_active_at: format_unix_secs(last_active),
+                auth_mode: state.auth_mode.as_ref().clone(),
+                cmd_preview: state.cmd_preview.as_ref().clone(),
+            },
+        ));
     }
 
-    items.sort_by(|a, b| a.created_at_unix.cmp(&b.created_at_unix));
-    items
+    for (session_id, closed_item) in closed.iter() {
+        if active_ids.contains(session_id) {
+            continue;
+        }
+        items.push((
+            closed_item.created_at_unix,
+            AdminSessionItem {
+                session_id: session_id.clone(),
+                state: SessionLifecycleState::Closed,
+                client_addr: closed_item.client_addr.clone(),
+                created_at: format_unix_secs(closed_item.created_at_unix),
+                last_active_at: format_unix_secs(closed_item.last_active_at_unix),
+                auth_mode: state.auth_mode.as_ref().clone(),
+                cmd_preview: state.cmd_preview.as_ref().clone(),
+            },
+        ));
+    }
+
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items.into_iter().map(|(_, item)| item).collect()
+}
+
+fn format_unix_secs(unix_secs: u64) -> String {
+    if let Some(dt) = DateTime::from_timestamp(unix_secs as i64, 0) {
+        return dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+    }
+    unix_secs.to_string()
 }
 
 async fn allocate_session_id(state: &ServeState) -> String {
@@ -787,12 +851,16 @@ async fn allocate_session_id(state: &ServeState) -> String {
             .map(char::from)
             .collect::<String>();
 
-        let exists = {
+        let exists_in_active = {
             let sessions = state.sessions.lock().await;
             sessions.contains_key(&id)
         };
+        let exists_in_closed = {
+            let sessions = state.closed_sessions.lock().await;
+            sessions.contains_key(&id)
+        };
 
-        if !exists {
+        if !exists_in_active && !exists_in_closed {
             return id;
         }
     }
@@ -958,13 +1026,13 @@ fn spawn_session_monitor(
     tokio::spawn(async move {
         match err_rx.recv().await {
             Some(Some(err)) => {
-                tracing::warn!("session {session_id} ended with error: {err}");
+                tracing::warn!("Session {session_id} ended abnormally: {err}");
             }
             Some(None) => {
-                tracing::info!("session {session_id} closed");
+                tracing::info!("Session {session_id} closed");
             }
             None => {
-                tracing::info!("session {session_id} monitor channel closed");
+                tracing::info!("Session {session_id} monitor channel closed");
             }
         }
         let _ = remove_session(&state, &session_id, false).await;
@@ -978,7 +1046,7 @@ fn spawn_answer_timeout(state: ServeState, session_id: String) {
         if let Some(session) = session {
             let answered = *session.answered.lock().await;
             if !answered {
-                tracing::info!("session {session_id} answer timeout, cleaning up");
+                tracing::info!("Session {session_id} Answer timed out, starting cleanup");
                 let _ = remove_session(&state, &session_id, true).await;
             }
         }
@@ -990,6 +1058,11 @@ async fn get_session(state: &ServeState, session_id: &str) -> Option<Arc<Browser
     sessions.get(session_id).cloned()
 }
 
+async fn is_closed_session(state: &ServeState, session_id: &str) -> bool {
+    let sessions = state.closed_sessions.lock().await;
+    sessions.contains_key(session_id)
+}
+
 async fn remove_session(state: &ServeState, session_id: &str, send_quit: bool) -> bool {
     let session = {
         let mut sessions = state.sessions.lock().await;
@@ -997,6 +1070,11 @@ async fn remove_session(state: &ServeState, session_id: &str, send_quit: bool) -
     };
 
     if let Some(session) = session {
+        {
+            let mut lifecycle = session.lifecycle.lock().await;
+            *lifecycle = SessionLifecycleState::Closed;
+        }
+
         if send_quit {
             let dc_opt = {
                 let guard = session.dc.lock().unwrap();
@@ -1007,6 +1085,25 @@ async fn remove_session(state: &ServeState, session_id: &str, send_quit: bool) -
             }
         }
         let _ = session.pc.close().await;
+
+        let last_active = *session.last_active_at_unix.lock().await;
+        let mut closed_sessions = state.closed_sessions.lock().await;
+        let mut closed_order = state.closed_session_order.lock().await;
+        closed_sessions.insert(
+            session_id.to_string(),
+            ClosedSessionInfo {
+                client_addr: session.client_addr.clone(),
+                created_at_unix: session.created_at_unix,
+                last_active_at_unix: last_active,
+            },
+        );
+        closed_order.push_back(session_id.to_string());
+
+        while closed_order.len() > CLOSED_SESSION_HISTORY_LIMIT {
+            if let Some(evicted_id) = closed_order.pop_front() {
+                closed_sessions.remove(&evicted_id);
+            }
+        }
         true
     } else {
         false

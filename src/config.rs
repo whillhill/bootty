@@ -112,8 +112,12 @@ pub fn load_or_create_config() -> Result<BoottyConfig> {
 
     let text = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    let cfg: BoottyConfig = serde_json::from_str(&text)
-        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    let cfg: BoottyConfig = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "Failed to parse config file: {}. If this is an old version config, run `bootty config init --force`",
+            path.display()
+        )
+    })?;
     validate_config(&cfg)?;
     Ok(cfg)
 }
@@ -131,7 +135,7 @@ pub fn save_config(cfg: &BoottyConfig) -> Result<()> {
 pub fn init_config(force: bool) -> Result<BoottyConfig> {
     let path = config_path()?;
     if path.exists() && !force {
-        bail!("Config file already exists. Use --force to overwrite it.");
+        bail!("Config file already exists, use --force to overwrite");
     }
     let cfg = BoottyConfig::default();
     save_config(&cfg)?;
@@ -175,7 +179,7 @@ pub fn remove_serve_runtime() -> Result<()> {
 
 pub fn hash_password(password: &str) -> Result<String> {
     if password.is_empty() {
-        bail!("Password must not be empty");
+        bail!("Password cannot be empty");
     }
 
     let mut salt = [0u8; 16];
@@ -224,13 +228,19 @@ fn validate_config(cfg: &BoottyConfig) -> Result<()> {
         );
     }
     if cfg.network.stun_servers.is_empty() {
-        bail!("Invalid config: network.stun_servers must not be empty");
+        bail!("Invalid config: network.stun_servers cannot be empty");
     }
     if cfg.host.default_cmd.is_empty() {
-        bail!("Invalid config: host.default_cmd must not be empty");
+        bail!("Invalid config: host.default_cmd cannot be empty");
     }
     if cfg.serve.max_sessions == 0 {
         bail!("Invalid config: serve.max_sessions must be greater than 0");
+    }
+    if cfg.serve.mode == ServeMode::LanAuth && cfg.serve.auth.auth_type == ServeAuthType::None {
+        bail!("Invalid config: serve.auth.type cannot be none when serve.mode=lan-auth");
+    }
+    if cfg.serve.auth.auth_type == ServeAuthType::Password && cfg.serve.auth.password_hash.is_none() {
+        bail!("Invalid config: serve.auth.password_hash is required when serve.auth.type=password");
     }
     Ok(())
 }
@@ -247,7 +257,7 @@ fn run_dir() -> Result<PathBuf> {
 fn ensure_config_dir() -> Result<()> {
     let dir = config_dir()?;
     if !dir.exists() {
-        fs::create_dir_all(&dir).with_context(|| format!("Failed to create config dir: {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
     }
     Ok(())
 }
@@ -256,7 +266,7 @@ fn ensure_run_dir() -> Result<()> {
     ensure_config_dir()?;
     let dir = run_dir()?;
     if !dir.exists() {
-        fs::create_dir_all(&dir).with_context(|| format!("Failed to create runtime dir: {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("Failed to create runtime directory: {}", dir.display()))?;
     }
     Ok(())
 }

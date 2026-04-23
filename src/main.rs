@@ -12,8 +12,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use client::ClientSession;
 use config::{
-    config_path, hash_password, init_config, load_or_create_config, read_serve_runtime, save_config,
-    BoottyConfig, ServeAuthType, ServeMode,
+    config_path, hash_password, init_config, load_or_create_config, read_serve_runtime, remove_serve_runtime,
+    save_config, BoottyConfig, ServeAuthType, ServeMode, ServeRuntimeInfo,
 };
 use host::HostSession;
 use rand::Rng;
@@ -26,6 +26,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "bootty")]
 #[command(about = "Share terminal sessions over WebRTC")]
+#[command(disable_version_flag = true)]
 struct Cli {
     #[arg(short = 'v', long = "verbose", global = true, help = "Enable verbose logging")]
     verbose: bool,
@@ -138,7 +139,10 @@ struct ConfigArgs {
 #[derive(Subcommand, Debug)]
 enum ConfigAction {
     Path,
-    List,
+    List {
+        #[arg(long = "json", help = "Use JSON format output")]
+        json: bool,
+    },
     Get { key: String },
     Set { key: String, value: String },
     Unset { key: String },
@@ -161,7 +165,6 @@ enum ServeModeArg {
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ServeAuthArg {
-    None,
     Pin,
     Password,
 }
@@ -170,6 +173,7 @@ enum ServeAuthArg {
 enum SessionStateArg {
     Pending,
     Connected,
+    Closed,
 }
 
 impl SessionStateArg {
@@ -177,6 +181,7 @@ impl SessionStateArg {
         match self {
             Self::Pending => "pending",
             Self::Connected => "connected",
+            Self::Closed => "closed",
         }
     }
 }
@@ -286,7 +291,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
 }
 
 async fn run_ls(args: LsArgs) -> Result<()> {
-    let runtime = read_serve_runtime().context("Failed to read active serve runtime")?;
+    let runtime = read_active_runtime()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -300,11 +305,14 @@ async fn run_ls(args: LsArgs) -> Result<()> {
         request = request.query(&[("state", state.as_str())]);
     }
 
-    let response = request.send().await.context("Failed to request session list")?;
+    let response = request
+        .send()
+        .await
+        .map_err(map_admin_request_error)?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        bail!("admin request failed: status={}, body={}", status, body);
+        bail!("Admin API request failed: status={}, body={}", status, body);
     }
 
     let sessions: Vec<AdminSessionItem> = response
@@ -322,7 +330,7 @@ async fn run_ls(args: LsArgs) -> Result<()> {
 }
 
 async fn run_cmd(args: CmdArgs) -> Result<()> {
-    let runtime = read_serve_runtime().context("Failed to read active serve runtime")?;
+    let runtime = read_active_runtime()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -342,23 +350,20 @@ async fn run_cmd(args: CmdArgs) -> Result<()> {
         .json(&payload)
         .send()
         .await
-        .context("Failed to send command injection request")?;
+        .map_err(map_admin_request_error)?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        bail!("admin request failed: status={}, body={}", status, body);
+        bail!("Admin API request failed: status={}, body={}", status, body);
     }
 
     let body: AdminCmdResponse = response
         .json()
         .await
-        .context("Failed to parse command injection response")?;
+        .context("Failed to parse command inject response")?;
 
-    println!(
-        "Command injected: session_id={}, bytes_sent={}",
-        body.session_id, body.bytes_sent
-    );
+    println!("Command injected: session_id={}, bytes_sent={}", body.session_id, body.bytes_sent);
     Ok(())
 }
 
@@ -368,9 +373,13 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             println!("{}", config_path()?.display());
             Ok(())
         }
-        ConfigAction::List => {
+        ConfigAction::List { json } => {
             let cfg = load_or_create_config()?;
-            println!("{}", serde_json::to_string_pretty(&cfg)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cfg)?);
+            } else {
+                print_config_table(&cfg);
+            }
             Ok(())
         }
         ConfigAction::Get { key } => {
@@ -392,7 +401,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             unset_config_value(&mut cfg, &key)?;
             validate_config_edit(&cfg)?;
             save_config(&cfg)?;
-            println!("Config key reset: {}", key);
+            println!("Config item reset: {}", key);
             Ok(())
         }
         ConfigAction::Init { force } => {
@@ -413,7 +422,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
                 cfg.serve.auth.auth_type = ServeAuthType::Password;
             }
             save_config(&cfg)?;
-            println!("Password hash updated in config");
+            println!("Password hash written to config");
             Ok(())
         }
     }
@@ -429,9 +438,92 @@ fn prompt_password() -> Result<String> {
         .context("Failed to read password")?;
     let password = input.trim().to_string();
     if password.is_empty() {
-        bail!("Password must not be empty");
+        bail!("Password cannot be empty");
     }
     Ok(password)
+}
+
+fn read_active_runtime() -> Result<ServeRuntimeInfo> {
+    match read_serve_runtime() {
+        Ok(runtime) => Ok(runtime),
+        Err(err) => {
+            if is_runtime_not_found(&err) {
+                bail!("No running serve process found, please run `bootty serve` first");
+            }
+            Err(err.context("Failed to read serve runtime"))
+        }
+    }
+}
+
+fn map_admin_request_error(err: reqwest::Error) -> anyhow::Error {
+    if err.is_connect() {
+        let _ = remove_serve_runtime();
+        anyhow::anyhow!("No running serve process found, please run `bootty serve` first")
+    } else if err.is_timeout() {
+        anyhow::anyhow!("Admin API request timed out, please check if the serve process is busy")
+    } else {
+        anyhow::anyhow!("Admin API request failed: {err}")
+    }
+}
+
+fn is_runtime_not_found(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::NotFound {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn print_config_table(cfg: &BoottyConfig) {
+    let rows = vec![
+        ("version", cfg.version.to_string()),
+        (
+            "network.stun_servers",
+            serde_json::to_string(&cfg.network.stun_servers).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        (
+            "host.default_cmd",
+            serde_json::to_string(&cfg.host.default_cmd).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        ("host.non_interactive", cfg.host.non_interactive.to_string()),
+        ("serve.host", cfg.serve.host.clone()),
+        ("serve.port", cfg.serve.port.to_string()),
+        ("serve.max_sessions", cfg.serve.max_sessions.to_string()),
+        (
+            "serve.mode",
+            match cfg.serve.mode {
+                ServeMode::Local => "local",
+                ServeMode::LanOpen => "lan-open",
+                ServeMode::LanAuth => "lan-auth",
+            }
+            .to_string(),
+        ),
+        (
+            "serve.auth.type",
+            match cfg.serve.auth.auth_type {
+                ServeAuthType::None => "none",
+                ServeAuthType::Pin => "pin",
+                ServeAuthType::Password => "password",
+            }
+            .to_string(),
+        ),
+        (
+            "serve.auth.password_hash",
+            cfg.serve
+                .auth
+                .password_hash
+                .clone()
+                .unwrap_or_else(|| "null".to_string()),
+        ),
+    ];
+
+    println!("{:<28} {}", "KEY", "VALUE");
+    for (key, value) in rows {
+        println!("{:<28} {}", key, value);
+    }
 }
 
 fn resolve_stun_servers(cli_values: &[String], cfg: &BoottyConfig) -> Vec<String> {
@@ -479,33 +571,36 @@ fn resolve_serve_auth(
     mode: &ServeModeArg,
     cfg: &BoottyConfig,
 ) -> Result<ServeAuthRuntime> {
-    let auth = cli_auth.unwrap_or_else(|| match cfg.serve.auth.auth_type {
-        ServeAuthType::None => ServeAuthArg::None,
-        ServeAuthType::Pin => ServeAuthArg::Pin,
-        ServeAuthType::Password => ServeAuthArg::Password,
-    });
+    if !matches!(mode, ServeModeArg::LanAuth) {
+        if cli_auth.is_some() {
+            bail!("--auth is only allowed with --mode lan-auth");
+        }
+        return Ok(ServeAuthRuntime::None);
+    }
+
+    let auth = match cli_auth {
+        Some(auth) => auth,
+        None => match cfg.serve.auth.auth_type {
+            ServeAuthType::Pin => ServeAuthArg::Pin,
+            ServeAuthType::Password => ServeAuthArg::Password,
+            ServeAuthType::None => bail!("--mode lan-auth requires --auth pin|password, or configure serve.auth.type first"),
+        },
+    };
 
     match auth {
-        ServeAuthArg::None => Ok(ServeAuthRuntime::None),
         ServeAuthArg::Pin => {
-            if !matches!(mode, ServeModeArg::LanAuth) {
-                bail!("--auth pin can only be used with --mode lan-auth");
-            }
             let mut rng = rand::thread_rng();
             let pin = format!("{:06}", rng.gen_range(0..1_000_000));
             Ok(ServeAuthRuntime::Pin(pin))
         }
         ServeAuthArg::Password => {
-            if !matches!(mode, ServeModeArg::LanAuth) {
-                bail!("--auth password can only be used with --mode lan-auth");
-            }
             let hash = cfg
                 .serve
                 .auth
                 .password_hash
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!(
-                    "Password auth requires serve.auth.password_hash in config. Use `bootty config set-password --prompt`."
+                    "password auth requires serve.auth.password_hash, please run `bootty config set-password --prompt` first"
                 ))?;
             Ok(ServeAuthRuntime::PasswordHash(hash))
         }
@@ -516,7 +611,7 @@ fn parse_bool(value: &str) -> Result<bool> {
     match value.trim().to_lowercase().as_str() {
         "true" | "1" | "yes" => Ok(true),
         "false" | "0" | "no" => Ok(false),
-        _ => bail!("Invalid bool value: {}", value),
+        _ => bail!("Invalid boolean value: {}", value),
     }
 }
 
@@ -526,7 +621,7 @@ fn parse_string_array(value: &str) -> Result<Vec<String>> {
         let arr: Vec<String> = serde_json::from_str(trimmed)
             .with_context(|| format!("Invalid JSON string array: {}", value))?;
         if arr.is_empty() {
-            bail!("Array must not be empty");
+            bail!("Array cannot be empty");
         }
         return Ok(arr);
     }
@@ -539,7 +634,7 @@ fn parse_string_array(value: &str) -> Result<Vec<String>> {
         .collect::<Vec<_>>();
 
     if list.is_empty() {
-        bail!("Array must not be empty");
+        bail!("Array cannot be empty");
     }
     Ok(list)
 }
@@ -607,7 +702,7 @@ fn set_config_value(cfg: &mut BoottyConfig, key: &str, value: &str) -> Result<()
         "serve.host" => {
             let host = value.trim();
             if host.is_empty() {
-                bail!("serve.host must not be empty");
+                bail!("serve.host cannot be empty");
             }
             cfg.serve.host = host.to_string();
         }
@@ -634,7 +729,7 @@ fn set_config_value(cfg: &mut BoottyConfig, key: &str, value: &str) -> Result<()
             let auth_type = parse_auth_type(value)?;
             if auth_type == ServeAuthType::Password && cfg.serve.auth.password_hash.is_none() {
                 bail!(
-                    "Cannot set serve.auth.type=password without password hash. Use `bootty config set-password --prompt` first."
+                    "Cannot set serve.auth.type to password: password_hash is missing, please run `bootty config set-password --prompt` first"
                 );
             }
             cfg.serve.auth.auth_type = auth_type;
@@ -690,18 +785,19 @@ fn unset_config_value(cfg: &mut BoottyConfig, key: &str) -> Result<()> {
 
 fn print_session_table(sessions: &[AdminSessionItem]) {
     println!(
-        "{:<14} {:<10} {:<18} {:<12} {:<12} {}",
-        "SESSION_ID", "STATE", "CLIENT_ADDR", "CREATED", "LAST_ACTIVE", "CMD"
+        "{:<14} {:<10} {:<18} {:<19} {:<19} {:<10} {}",
+        "SESSION_ID", "STATE", "CLIENT_ADDR", "CREATED_AT", "LAST_ACTIVE_AT", "AUTH", "CMD"
     );
 
     for item in sessions {
         println!(
-            "{:<14} {:<10} {:<18} {:<12} {:<12} {}",
+            "{:<14} {:<10} {:<18} {:<19} {:<19} {:<10} {}",
             item.session_id,
-            format!("{:?}", item.state).to_lowercase(),
+            item.state.as_str(),
             item.client_addr.clone().unwrap_or_else(|| "-".to_string()),
-            item.created_at_unix,
-            item.last_active_at_unix,
+            item.created_at,
+            item.last_active_at,
+            item.auth_mode,
             item.cmd_preview
         );
     }
@@ -709,10 +805,10 @@ fn print_session_table(sessions: &[AdminSessionItem]) {
 
 fn validate_config_edit(cfg: &BoottyConfig) -> Result<()> {
     if cfg.serve.mode == ServeMode::LanAuth && cfg.serve.auth.auth_type == ServeAuthType::None {
-        bail!("Invalid config transition: serve.mode=lan-auth requires serve.auth.type != none");
+        bail!("Invalid config: serve.auth.type cannot be none when serve.mode=lan-auth");
     }
     if cfg.serve.auth.auth_type == ServeAuthType::Password && cfg.serve.auth.password_hash.is_none() {
-        bail!("Invalid config transition: serve.auth.type=password requires serve.auth.password_hash");
+        bail!("Invalid config: serve.auth.password_hash is required when serve.auth.type=password");
     }
     Ok(())
 }
