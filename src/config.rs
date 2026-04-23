@@ -114,11 +114,18 @@ pub fn load_or_create_config() -> Result<BoottyConfig> {
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
     let cfg: BoottyConfig = serde_json::from_str(&text).with_context(|| {
         format!(
-            "Failed to parse config file: {}. If this is an old version config, run `bootty config init --force`",
-            path.display()
+            "Failed to parse config file: {}. {}",
+            path.display(),
+            config_recovery_hint()
         )
     })?;
-    validate_config(&cfg)?;
+    validate_config(&cfg).with_context(|| {
+        format!(
+            "Invalid config file: {}. {}",
+            path.display(),
+            config_recovery_hint()
+        )
+    })?;
     Ok(cfg)
 }
 
@@ -217,6 +224,10 @@ fn sha256_hex_with_salt(salt_hex: &str, password: &str) -> String {
     hasher.update(password.as_bytes());
     let output = hasher.finalize();
     hex::encode(output)
+}
+
+fn config_recovery_hint() -> &'static str {
+    "Hint: run `bootty config init --force` to regenerate config, or run `bootty config path` to locate the file."
 }
 
 fn validate_config(cfg: &BoottyConfig) -> Result<()> {

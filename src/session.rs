@@ -16,7 +16,6 @@ pub struct Session {
     pub pc: Arc<RTCPeerConnection>,
     pub err_tx: mpsc::Sender<Option<anyhow::Error>>,
     pub err_rx: mpsc::Receiver<Option<anyhow::Error>>,
-    pub stun_servers: Vec<String>,
 }
 
 impl Session {
@@ -138,7 +137,6 @@ impl Session {
             pc,
             err_tx,
             err_rx,
-            stun_servers,
         })
     }
 }

@@ -245,7 +245,7 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn run_host(args: HostArgs) -> Result<()> {
-    let cfg = load_or_create_config()?;
+    let cfg = load_config()?;
     let stun_servers = resolve_stun_servers(&args.stun_servers, &cfg);
     let cmd = resolve_command(&args.cmd, &cfg);
     let non_interactive = args.non_interactive || cfg.host.non_interactive;
@@ -255,7 +255,7 @@ async fn run_host(args: HostArgs) -> Result<()> {
 }
 
 async fn run_connect(args: ConnectArgs) -> Result<()> {
-    let cfg = load_or_create_config()?;
+    let cfg = load_config()?;
     let stun_servers = resolve_stun_servers(&args.stun_servers, &cfg);
 
     let mut client = ClientSession::new(args.offer, stun_servers).await?;
@@ -263,7 +263,7 @@ async fn run_connect(args: ConnectArgs) -> Result<()> {
 }
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
-    let cfg = load_or_create_config()?;
+    let cfg = load_config()?;
 
     let mode = args
         .mode
@@ -374,7 +374,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             Ok(())
         }
         ConfigAction::List { json } => {
-            let cfg = load_or_create_config()?;
+            let cfg = load_config()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&cfg)?);
             } else {
@@ -383,13 +383,13 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             Ok(())
         }
         ConfigAction::Get { key } => {
-            let cfg = load_or_create_config()?;
+            let cfg = load_config()?;
             let value = get_config_value(&cfg, &key)?;
             println!("{value}");
             Ok(())
         }
         ConfigAction::Set { key, value } => {
-            let mut cfg = load_or_create_config()?;
+            let mut cfg = load_config()?;
             set_config_value(&mut cfg, &key, &value)?;
             validate_config_edit(&cfg)?;
             save_config(&cfg)?;
@@ -397,7 +397,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             Ok(())
         }
         ConfigAction::Unset { key } => {
-            let mut cfg = load_or_create_config()?;
+            let mut cfg = load_config()?;
             unset_config_value(&mut cfg, &key)?;
             validate_config_edit(&cfg)?;
             save_config(&cfg)?;
@@ -414,7 +414,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             if !prompt {
                 bail!("set-password requires --prompt");
             }
-            let mut cfg = load_or_create_config()?;
+            let mut cfg = load_config()?;
             let password = prompt_password()?;
             let encoded = hash_password(&password)?;
             cfg.serve.auth.password_hash = Some(encoded);
@@ -426,6 +426,10 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn load_config() -> Result<BoottyConfig> {
+    load_or_create_config().context("Failed to load config")
 }
 
 fn prompt_password() -> Result<String> {
