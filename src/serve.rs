@@ -55,6 +55,8 @@ const INDEX_HTML_TEMPLATE: &str = r#"
 <script src="/assets/xterm.min.js"></script>
 <script src="/assets/addon-fit.min.js"></script>
 <script>
+let clearPendingConnectTimeout = () => {};
+
 (async function() {
   const AUTH_REQUIRED = __AUTH_REQUIRED__;
   const AUTH_LABEL = "__AUTH_LABEL__";
@@ -65,8 +67,38 @@ const INDEX_HTML_TEMPLATE: &str = r#"
   let pc = null;
   let sessionId = null;
   let authSecret = '';
+  let hasConnected = false;
+  let sessionEnded = false;
+  let connectTimeoutId = null;
+  let connectTimedOut = false;
+  const CONNECT_TIMEOUT_MS = 20000;
 
-  function log(msg) { status.textContent = msg; console.log(msg); }
+  function log(msg) {
+    if ((!connectTimedOut || hasConnected) && (!sessionEnded || msg === 'Session ended')) {
+      status.textContent = msg;
+    }
+    console.log(msg);
+  }
+  function clearConnectTimeout() {
+    if (connectTimeoutId !== null) {
+      window.clearTimeout(connectTimeoutId);
+      connectTimeoutId = null;
+    }
+  }
+  function startConnectTimeout() {
+    clearConnectTimeout();
+    connectTimedOut = false;
+    connectTimeoutId = window.setTimeout(() => {
+      connectTimeoutId = null;
+      if (hasConnected || !pc || pc.connectionState === 'closed') return;
+      connectTimedOut = true;
+      status.textContent = 'Connection timed out. Please refresh and retry.';
+      console.warn('Connection timed out after sending Answer.');
+      pc.close();
+      closeSession();
+    }, CONNECT_TIMEOUT_MS);
+  }
+  clearPendingConnectTimeout = clearConnectTimeout;
   function authHeaders() {
     if (!AUTH_REQUIRED || !authSecret) return {};
     return { 'x-bootty-auth': authSecret };
@@ -75,11 +107,7 @@ const INDEX_HTML_TEMPLATE: &str = r#"
   function logIceCandidateError(event) {
     const code = typeof event.errorCode === 'number' ? event.errorCode : 'unknown';
     const text = event.errorText || 'unknown';
-    const isStunLookupError =
-      code === 701 &&
-      typeof text === 'string' &&
-      text.toLowerCase().includes('stun host lookup');
-    if (isStunLookupError) {
+    if (code === 701) {
       console.warn(`ICE candidate warning (can be ignored): code=${code}, text=${text}`);
       return;
     }
@@ -88,6 +116,7 @@ const INDEX_HTML_TEMPLATE: &str = r#"
   }
 
   function closeSession() {
+    clearConnectTimeout();
     if (!sessionId) return;
     fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE',
@@ -151,13 +180,68 @@ const INDEX_HTML_TEMPLATE: &str = r#"
   log(`Session ${sessionId} created. Establishing connection...`);
 
   pc = new RTCPeerConnection({
-    iceServers: [{ urls: session.stun_server }]
+    iceServers: session.stun_servers.map((url) => ({ urls: url }))
   });
   pc.oniceconnectionstatechange = () => {
-    log(`ICE: ${pc.iceConnectionState}`);
+    console.log(`ICE: ${pc.iceConnectionState}`);
+    if (sessionEnded) {
+      return;
+    }
+    if (connectTimedOut && !hasConnected) {
+      return;
+    }
+    if (pc.iceConnectionState === 'checking') {
+      status.textContent = 'Establishing connection...';
+      return;
+    }
+    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      clearConnectTimeout();
+      hasConnected = true;
+      status.textContent = 'ICE connected. Waiting for session...';
+      return;
+    }
+    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+      if (hasConnected) {
+        status.textContent = 'Connection interrupted. Waiting for recovery...';
+      }
+      console.warn(`ICE state during negotiation: ${pc.iceConnectionState}`);
+      return;
+    }
+    status.textContent = `ICE: ${pc.iceConnectionState}`;
   };
   pc.onconnectionstatechange = () => {
-    log(`Peer: ${pc.connectionState}`);
+    console.log(`Peer: ${pc.connectionState}`);
+    if (sessionEnded) {
+      return;
+    }
+    if (connectTimedOut && !hasConnected) {
+      return;
+    }
+    if (pc.connectionState === 'connecting') {
+      status.textContent = 'Establishing connection...';
+      return;
+    }
+    if (pc.connectionState === 'connected') {
+      clearConnectTimeout();
+      hasConnected = true;
+      status.textContent = 'Connected';
+      return;
+    }
+    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      if (hasConnected) {
+        status.textContent = pc.connectionState === 'failed'
+          ? 'Connection lost. Please refresh and retry.'
+          : 'Connection interrupted. Waiting for recovery...';
+      }
+      console.warn(`Peer state during negotiation: ${pc.connectionState}`);
+      return;
+    }
+    if (pc.connectionState === 'closed') {
+      clearConnectTimeout();
+      status.textContent = 'Disconnected';
+      return;
+    }
+    status.textContent = `Peer: ${pc.connectionState}`;
   };
   pc.onicecandidateerror = logIceCandidateError;
 
@@ -166,6 +250,8 @@ const INDEX_HTML_TEMPLATE: &str = r#"
     dc.binaryType = 'arraybuffer';
 
     dc.onopen = () => {
+      clearConnectTimeout();
+      hasConnected = true;
       log('Connected');
       fitAddon.fit();
       sendTermSize();
@@ -175,6 +261,8 @@ const INDEX_HTML_TEMPLATE: &str = r#"
     dc.onmessage = async (evt) => {
       if (typeof evt.data === 'string') {
         if (evt.data === 'quit') {
+          sessionEnded = true;
+          clearConnectTimeout();
           log('Session ended');
           dc.close();
           closeSession();
@@ -192,8 +280,20 @@ const INDEX_HTML_TEMPLATE: &str = r#"
       }
     };
 
-    dc.onclose = () => { log('Disconnected'); closeSession(); };
-    dc.onerror = (err) => { log('Data channel error'); console.error(err); };
+    dc.onclose = () => {
+      clearConnectTimeout();
+      if (!sessionEnded) {
+        log('Disconnected');
+      }
+      closeSession();
+    };
+    dc.onerror = (err) => {
+      clearConnectTimeout();
+      if (!sessionEnded) {
+        log('Data channel error');
+      }
+      console.error(err);
+    };
   };
 
   await pc.setRemoteDescription({ type: 'offer', sdp: session.offer_sdp });
@@ -232,6 +332,7 @@ const INDEX_HTML_TEMPLATE: &str = r#"
     return;
   }
   log('Answer sent. Waiting for connection...');
+  startConnectTimeout();
 
   term.onData((data) => {
     sendControlMessage(['stdin', data]);
@@ -245,6 +346,7 @@ const INDEX_HTML_TEMPLATE: &str = r#"
   window.addEventListener('click', () => term.focus());
 })().catch((err) => {
   console.error('Connection flow error', err);
+  clearPendingConnectTimeout();
   const status = document.getElementById('status');
   if (status) {
     status.textContent = 'Connection flow error. Check the console for details.';
@@ -341,7 +443,6 @@ pub struct ServeState {
     cmd: Arc<Vec<String>>,
     cmd_preview: Arc<String>,
     non_interactive: bool,
-    stun_server: String,
     stun_servers: Arc<Vec<String>>,
     max_sessions: usize,
     mode: ServeMode,
@@ -382,7 +483,7 @@ struct ClosedSessionInfo {
 struct CreateSessionResponse {
     session_id: String,
     offer_sdp: String,
-    stun_server: String,
+    stun_servers: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -397,7 +498,6 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
         bail!("At least one STUN server is required");
     }
 
-    let stun_server = options.stun_servers[0].clone();
     let cmd_preview = if options.cmd.is_empty() {
         "bash -l".to_string()
     } else {
@@ -408,7 +508,6 @@ pub async fn start_server(options: ServeLaunchOptions) -> Result<()> {
         cmd: Arc::new(options.cmd.clone()),
         cmd_preview: Arc::new(cmd_preview),
         non_interactive: options.non_interactive,
-        stun_server,
         stun_servers: Arc::new(options.stun_servers.clone()),
         max_sessions: options.max_sessions,
         mode: options.mode.clone(),
@@ -607,7 +706,7 @@ async fn create_session_handler(
     Ok(Json(CreateSessionResponse {
         session_id,
         offer_sdp,
-        stun_server: state.stun_server.clone(),
+        stun_servers: state.stun_servers.as_ref().clone(),
     }))
 }
 

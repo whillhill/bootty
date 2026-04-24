@@ -33,7 +33,7 @@ jobs:
           grep -q 'npm_packages_dir = ROOT / "npm" / "packages"' scripts/sync_version.py || { echo "[error] scripts/sync_version.py is outdated (likely still references old paths)"; exit 1; }
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 
       - name: Install Node.js
         uses: actions/setup-node@v6
