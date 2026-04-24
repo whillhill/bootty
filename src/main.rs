@@ -32,7 +32,7 @@ struct Cli {
     verbose: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -235,12 +235,97 @@ fn init_logging(verbose: bool) {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Host(args) => run_host(args).await,
-        Commands::Connect(args) => run_connect(args).await,
-        Commands::Serve(args) => run_serve(args).await,
-        Commands::Ls(args) => run_ls(args).await,
-        Commands::Cmd(args) => run_cmd(args).await,
-        Commands::Config(args) => run_config(args),
+        Some(Commands::Host(args)) => run_host(args).await,
+        Some(Commands::Connect(args)) => run_connect(args).await,
+        Some(Commands::Serve(args)) => run_serve(args).await,
+        Some(Commands::Ls(args)) => run_ls(args).await,
+        Some(Commands::Cmd(args)) => run_cmd(args).await,
+        Some(Commands::Config(args)) => run_config(args),
+        None => run_interactive_menu().await,
+    }
+}
+
+async fn run_interactive_menu() -> Result<()> {
+    loop {
+        println!();
+        println!("Bootty Interactive Menu");
+        println!("1) Start serve (local)");
+        println!("2) Start serve (LAN open, no auth)");
+        println!("3) Start serve (LAN auth)");
+        println!("4) Show config");
+        println!("0) Exit");
+        print!("Select an option [0-4]: ");
+        io::stdout().flush().context("Failed to flush stdout")?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read menu selection")?;
+
+        match input.trim() {
+            "0" => {
+                println!("Exit.");
+                return Ok(());
+            }
+            "1" => {
+                println!("Starting serve in local mode...");
+                if let Err(err) = run_serve(ServeArgs {
+                    host: None,
+                    port: None,
+                    mode: Some(ServeModeArg::Local),
+                    auth: None,
+                    max_sessions: None,
+                    stun_servers: Vec::new(),
+                    cmd: Vec::new(),
+                })
+                .await
+                {
+                    println!("Failed to start serve: {err:#}");
+                }
+            }
+            "2" => {
+                println!("Starting serve in LAN open mode...");
+                if let Err(err) = run_serve(ServeArgs {
+                    host: None,
+                    port: None,
+                    mode: Some(ServeModeArg::LanOpen),
+                    auth: None,
+                    max_sessions: None,
+                    stun_servers: Vec::new(),
+                    cmd: Vec::new(),
+                })
+                .await
+                {
+                    println!("Failed to start serve: {err:#}");
+                }
+            }
+            "3" => {
+                println!("Starting serve in LAN auth mode (PIN)...");
+                if let Err(err) = run_serve(ServeArgs {
+                    host: None,
+                    port: None,
+                    mode: Some(ServeModeArg::LanAuth),
+                    auth: Some(ServeAuthArg::Pin),
+                    max_sessions: None,
+                    stun_servers: Vec::new(),
+                    cmd: Vec::new(),
+                })
+                .await
+                {
+                    println!("Failed to start serve: {err:#}");
+                }
+            }
+            "4" => {
+                if let Err(err) = run_config(ConfigArgs {
+                    action: ConfigAction::List { json: false },
+                }) {
+                    println!("Failed to show config: {err:#}");
+                }
+            }
+            _ => {
+                println!("Invalid selection. Please enter a number from 0 to 4.");
+            }
+        }
     }
 }
 
